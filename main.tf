@@ -65,12 +65,16 @@ resource "aws_security_group" "all" {
     protocol    = "-1"
     cidr_blocks = [aws_vpc.vpc.cidr_block]
   }
-  # Uncomment to open SSH to task worker instances via EC2 Instance Connect (for troubleshooting)
-  ingress {
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+  
+  dynamic "ingress" {
+    # Only adds ssh ingress when ssh_keyname is set
+    for_each = var.ssh_keyname != "" ? [1] : []
+    content {
+      from_port   = 22
+      to_port     = 22
+      protocol    = "tcp"
+      cidr_blocks = ["0.0.0.0/0"]
+    }
   }
   
   egress {
@@ -191,19 +195,6 @@ data "cloudinit_config" "task" {
         set -euxo pipefail
         shopt -s nullglob
         
-        ### Does make problems when used as templatefile
-        # dnf install -y mdadm
-        # devices=(/dev/xvd[b-m] /dev/disk/by-id/nvme-Amazon_EC2_NVMe_Instance_Storage_AWS?????????????????)
-        # num_devices="${#devices[@]}"
-        # if (( num_devices > 0 )) && ! grep /dev/md0 <(df); then
-        #     mdadm --create /dev/md0 --force --auto=yes --level=0 --chunk=256 --raid-devices=${num_devices} ${devices[@]}
-        #     mkfs.xfs -f /dev/md0
-        #     mkdir -p /mnt/scratch
-        #     mount -o defaults,noatime,largeio,logbsize=256k -t xfs /dev/md0 /mnt/scratch
-        #     echo UUID=$(blkid -s UUID -o value /dev/md0) /mnt/scratch xfs defaults,noatime,largeio,logbsize=256k 0 2 >> /etc/fstab
-        #     #update-initramfs -u
-        # fi
-        
         mkdir -p /mnt/scratch/tmp
         systemctl stop docker || true
         if [ -d /var/lib/docker ] && [ ! -L /var/lib/docker ]; then
@@ -246,7 +237,7 @@ resource "aws_launch_template" "task" {
   iam_instance_profile {
     name = aws_iam_instance_profile.task.name
   }
-  key_name ="memverge-ap-southeast-1"
+  key_name = var.ssh_keyname != "" ? var.ssh_keyname : null
   block_device_mappings {
     device_name = "/dev/xvda"
     ebs {

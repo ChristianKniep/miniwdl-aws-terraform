@@ -41,3 +41,7 @@ variable "mmab_server" {
     description = "URl to the MMAB API server"
 }
 
+variable "ssh_keyname" {
+    description = "ssh keypair name in region the stack is deployed into"
+}
+
