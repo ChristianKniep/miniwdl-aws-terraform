@@ -16,7 +16,7 @@ variable "s3upload_buckets" {
 variable "create_spot_service_roles" {
   description = "Create account-wide spot service roles (disable if they already exist)"
   type        = bool
-  default     = true
+  default     = false
 }
 
 variable "task_max_vcpus" {
@@ -36,3 +36,8 @@ variable "enable_task_fallback" {
   type        = bool
   default     = false
 }
+
+variable "mmab_server" {
+    description = "URl to the MMAB API server"
+}
+

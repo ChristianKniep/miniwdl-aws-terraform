@@ -66,14 +66,13 @@ resource "aws_security_group" "all" {
     cidr_blocks = [aws_vpc.vpc.cidr_block]
   }
   # Uncomment to open SSH to task worker instances via EC2 Instance Connect (for troubleshooting)
-  /*
   ingress {
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
-  */
+  
   egress {
     from_port   = 0
     to_port     = 0
@@ -101,7 +100,7 @@ resource "aws_efs_file_system" "efs" {
     transition_to_primary_storage_class = "AFTER_1_ACCESS"
   }
   lifecycle {
-    prevent_destroy = true
+    prevent_destroy = false
   }
 }
 
@@ -114,6 +113,44 @@ resource "aws_efs_mount_target" "target" {
 
 resource "aws_efs_access_point" "ap" {
   file_system_id = aws_efs_file_system.efs.id
+  posix_user {
+    uid = 0
+    gid = 0
+  }
+}
+
+/**************************************************************************************************
+ * EFS /mmc-checkpoint
+ *************************************************************************************************/
+
+resource "aws_efs_file_system" "ckpt" {
+  encrypted        = true
+  performance_mode = "generalPurpose"
+  throughput_mode  = "bursting"
+  # ^ Larger-scale workloads may need throughput_mode changed to "elastic" (not set by default due
+  #   to increased cost). If you're sure you will NOT use "elastic" throughput_mode, then you may
+  #   set performance_mode to "maxIO" to get more IOPS (but this must be set at initial filesystem
+  #   creation, and isn't compatible with elastic throughput_mode).
+  lifecycle_policy {
+    transition_to_ia                    = "AFTER_14_DAYS"
+  }
+  lifecycle_policy {
+    transition_to_primary_storage_class = "AFTER_1_ACCESS"
+  }
+  lifecycle {
+    prevent_destroy = false
+  }
+}
+
+resource "aws_efs_mount_target" "ckpt_target" {
+  count           = length(aws_subnet.public)
+  file_system_id  = aws_efs_file_system.ckpt.id
+  subnet_id       = aws_subnet.public[count.index].id
+  security_groups = [aws_security_group.all.id]
+}
+
+resource "aws_efs_access_point" "ckpt_ap" {
+  file_system_id = aws_efs_file_system.ckpt.id
   posix_user {
     uid = 0
     gid = 0
@@ -140,7 +177,51 @@ data "cloudinit_config" "task" {
 
   part {
     content_type = "text/x-shellscript"
-    content      = file("${path.module}/assets/init_docker_instance_storage.sh")
+   content      = <<-EOT
+        #!/bin/bash
+        # To run on first boot of an EC2 instance with NVMe instance storage volumes:
+        # 1) Assembles them into a RAID0 array, formats with XFS, and mounts to /mnt/scratch
+        # 2) Replaces /var/lib/docker with a symlink to /mnt/scratch/docker so that docker images and
+        #    container file systems use this high-performance scratch space. (restarts docker)
+        # The configuration persists through reboots (but not instance stop).
+        # logs go to /var/log/cloud-init-output.log
+        # refs:
+        # https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ssd-instance-store.html
+        # https://github.com/kislyuk/aegea/blob/master/aegea/rootfs.skel/usr/bin/aegea-format-ephemeral-storage
+        set -euxo pipefail
+        shopt -s nullglob
+        mkdir -p /mnt/scratch/tmp
+        systemctl stop docker || true
+        if [ -d /var/lib/docker ] && [ ! -L /var/lib/docker ]; then
+        mv /var/lib/docker /mnt/scratch
+        fi
+        mkdir -p /mnt/scratch/docker
+        ln -s /mnt/scratch/docker /var/lib/docker
+        # Create checkpoint dir
+        yum install -y amazon-efs-utils
+        mkdir -p /mmc-checkpoint
+        mount -t efs -o tls ${aws_efs_file_system.ckpt.id}:/ /mmc-checkpoint
+        # Install MM batch engine
+        curl -k ${var.mmab_server}/api/v1/scripts/install-pagent | bash
+        systemctl restart docker || true
+        systemctl restart --no-block ecs
+        EOT
+  }
+}
+
+
+data "aws_ami" "ecs_al2023" {
+  most_recent = true
+  owners      = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["al2023-ami-ecs-*"]
+  }
+
+  filter {
+    name   = "state"
+    values = ["available"]
   }
 }
 
@@ -150,6 +231,7 @@ resource "aws_launch_template" "task" {
   iam_instance_profile {
     name = aws_iam_instance_profile.task.name
   }
+  key_name ="memverge-ap-southeast-1"
   block_device_mappings {
     device_name = "/dev/xvda"
     ebs {
@@ -167,7 +249,7 @@ resource "aws_batch_compute_environment" "task" {
   compute_environment_name_prefix = "${var.environment_tag}-task"
   type                            = "MANAGED"
   service_role                    = aws_iam_role.batch.arn
-
+  
   compute_resources {
     type                = "SPOT"
     instance_type       = ["m5d", "c5d", "r5d"]
@@ -178,7 +260,10 @@ resource "aws_batch_compute_environment" "task" {
     spot_iam_fleet_role = aws_iam_role.spot_fleet.arn
     instance_role       = aws_iam_instance_profile.task.arn
     # ^ Terraform requires instance_role even though it seems redundant with launch template
-
+    ec2_configuration {
+      image_id_override = data.aws_ami.ecs_al2023.id
+      image_type = "ECS_AL2023"
+    }
     launch_template {
       launch_template_id = aws_launch_template.task.id
       version            = aws_launch_template.task.latest_version

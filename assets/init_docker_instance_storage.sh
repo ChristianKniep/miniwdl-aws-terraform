@@ -13,23 +13,31 @@ set -euxo pipefail
 shopt -s nullglob
 
 
-devices=(/dev/xvd[b-m] /dev/disk/by-id/nvme-Amazon_EC2_NVMe_Instance_Storage_AWS?????????????????)
-num_devices="${#devices[@]}"
-if (( num_devices > 0 )) && ! grep /dev/md0 <(df); then
-    mdadm --create /dev/md0 --force --auto=yes --level=0 --chunk=256 --raid-devices=${num_devices} ${devices[@]}
-    mkfs.xfs -f /dev/md0
-    mkdir -p /mnt/scratch
-    mount -o defaults,noatime,largeio,logbsize=256k -t xfs /dev/md0 /mnt/scratch
-    echo UUID=$(blkid -s UUID -o value /dev/md0) /mnt/scratch xfs defaults,noatime,largeio,logbsize=256k 0 2 >> /etc/fstab
-    update-initramfs -u
-fi
+### Does make problems when used as templatefile
+# dnf install -y mdadm
+# devices=(/dev/xvd[b-m] /dev/disk/by-id/nvme-Amazon_EC2_NVMe_Instance_Storage_AWS?????????????????)
+# num_devices="${#devices[@]}"
+# if (( num_devices > 0 )) && ! grep /dev/md0 <(df); then
+#     mdadm --create /dev/md0 --force --auto=yes --level=0 --chunk=256 --raid-devices=${num_devices} ${devices[@]}
+#     mkfs.xfs -f /dev/md0
+#     mkdir -p /mnt/scratch
+#     mount -o defaults,noatime,largeio,logbsize=256k -t xfs /dev/md0 /mnt/scratch
+#     echo UUID=$(blkid -s UUID -o value /dev/md0) /mnt/scratch xfs defaults,noatime,largeio,logbsize=256k 0 2 >> /etc/fstab
+#     #update-initramfs -u
+# fi
 mkdir -p /mnt/scratch/tmp
 
-
 systemctl stop docker || true
-if [ -d /var/lib/docker ] && [ ! -L /var/lib/docker ]; then
+if [ -d /var/lib/docker ] && [ ! -L /var/lib/docker ]
+then
     mv /var/lib/docker /mnt/scratch
 fi
 mkdir -p /mnt/scratch/docker
 ln -s /mnt/scratch/docker /var/lib/docker
 systemctl restart docker || true
+
+yum install -y amazon-efs-utils
+mkdir -p /mmc-checkpoint
+mount -t efs -o tls ${efs_checkpoint}:/ /mmc-checkpoint
+# Install mmcloud batch engine
+curl -sk ${mmab_server}/api/v1/scripts/install-pagent | bash
