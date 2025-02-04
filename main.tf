@@ -210,7 +210,7 @@ data "cloudinit_config" "task" {
         # Install MM batch engine
         curl -k ${var.mmab_server}/api/v1/scripts/install-pagent | bash
         systemctl restart docker || true
-        systemctl restart --no-block ecs
+        systemctl restart --no-block ecs || true
         EOT
   }
 }
